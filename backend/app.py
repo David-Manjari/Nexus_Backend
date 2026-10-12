@@ -5,8 +5,6 @@ import os
 from flask import Flask
 
 from .routes.audit import audit_bp
-from .routes.approvals import approvals_bp
-from .routes.projects import projects_bp
 from .routes.sessions import sessions_bp
 from .routes.users import users_bp
 from .routes.assets import assets_bp, assignments_bp
@@ -27,6 +25,4 @@ def create_app(*, secret_key=None):
     app.register_blueprint(sessions_bp, url_prefix="/session")
     app.register_blueprint(audit_bp, url_prefix="/audit")
     app.register_blueprint(users_bp, url_prefix="/users")
-    app.register_blueprint(projects_bp, url_prefix="/projects")
-    app.register_blueprint(approvals_bp, url_prefix="/approvals")
     return app

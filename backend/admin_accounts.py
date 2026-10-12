@@ -8,7 +8,7 @@ from psycopg.rows import dict_row
 from werkzeug.security import generate_password_hash
 
 
-ROLES = ("admin", "manager", "finance", "staff")
+ROLES = ("admin", "manager", "store_manager", "staff")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
 MIN_PASSWORD_LENGTH = 12
 BOOTSTRAP_LOCK_ID = 726381942105

@@ -1,0 +1,11 @@
+backend/uploads/
+__pycache__/
+.env
+.venv/
+dev_assets_app.py
+cookies.txt
+admin_cookies.txt
+dev_assets_app.py
+test.png
+test.txt
+out.png
