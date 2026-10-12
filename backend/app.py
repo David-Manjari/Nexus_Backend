@@ -7,6 +7,7 @@ from flask import Flask
 from .routes.audit import audit_bp
 from .routes.sessions import sessions_bp
 from .routes.users import users_bp
+from .routes.assets import assets_bp, assignments_bp
 
 
 def create_app(*, secret_key=None):
