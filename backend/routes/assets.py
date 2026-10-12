@@ -22,22 +22,15 @@ assets_bp = Blueprint("assets", __name__)
 assignments_bp = Blueprint("assignments", __name__)
 
 # ---------------------------------------------------------------------------
-# ASSUMPTIONS: confirm with Member 1 (tables) and Member 2 (role names)
+# Roles come from ROLES in admin_accounts.py
 # ---------------------------------------------------------------------------
 ASSETS = '"Assets"'
 VEHICLES = '"Vehicle_Details"'
 ASSIGNMENTS = '"Asset_Assignments"'
 USERS = '"Users"'
 
-WRITE_ROLES = ("store_manager",)
-READ_ROLES = (
-    "admin",
-    "project_manager",
-    "field_worker",
-    "store_manager",
-    "approver",
-    "disbursement_officer",
-)
+WRITE_ROLES = ("store_manager","admin")
+READ_ROLES = ("admin", "manager", "store_manager", "staff")
 
 ASSET_TYPES = {"tool", "device", "vehicle"}
 EDITABLE_STATUSES = {"available", "maintenance", "retired"}  # "assigned" only via /assign
