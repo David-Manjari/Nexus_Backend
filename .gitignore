@@ -2,7 +2,6 @@ backend/uploads/
 __pycache__/
 .env
 .venv/
-.pyc
 dev_assets_app.py
 cookies.txt
 admin_cookies.txt
