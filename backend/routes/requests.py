@@ -3,11 +3,13 @@
 Anyone signed in can raise a request and see their own. Managers also see the
 requests escalated to them, store managers see every asset request, and admins
 see everything. Only store managers and admins can fulfil an asset request.
+Every response includes the request's history (the status timeline).
 
 Register in app.py:
     app.register_blueprint(requests_bp, url_prefix="/requests")
 """
 
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, jsonify, request, session
@@ -15,10 +17,12 @@ from flask import Blueprint, jsonify, request, session
 from ..admin_accounts import connect_database
 from ..auth import roles_required
 from ..services.request_workflow import (
+    attach_history,
     check_stock,
     convert_to_procurement,
     escalate_request,
     pick_approver,
+    record_event,
 )
 
 requests_bp = Blueprint("requests", __name__)
@@ -33,6 +37,7 @@ VIEW_ROLES = ("admin", "manager", "store_manager", "staff")
 FULFIL_ROLES = ("store_manager", "admin")
 
 REQUEST_TYPES = {"asset", "disbursement", "project"}
+ASSET_TYPES = {"tool", "device", "vehicle"}
 REQUEST_STATUSES = {
     "pending", "escalated", "approved", "rejected",
     "fulfilled", "converted", "cancelled",
@@ -42,8 +47,8 @@ MAX_AMOUNT = Decimal("9999999999.99")  # fits NUMERIC(12,2)
 
 REQUEST_SELECT = f"""
 SELECT r.request_id, r.request_type, r.requested_by, u.username AS requester_name,
-       r.project_id, r.asset_id, r.item_name, r.category, r.quantity, r.amount,
-       r.reason, r.status, r.escalated_to, r.fulfilled_by,
+       r.project_id, r.asset_id, r.asset_type, r.item_name, r.category, r.quantity,
+       r.amount, r.needed_by, r.reason, r.status, r.escalated_to, r.fulfilled_by,
        r.created_at, r.updated_at
 FROM {REQUESTS} r
 JOIN {USERS} u ON u.user_id = r.requested_by
@@ -75,6 +80,15 @@ def _int(value):
     try:
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _date(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
         return None
 
 
@@ -110,6 +124,7 @@ def _visibility(role, user_id):
 def create_request():
     """Raise a request for an asset, a disbursement or project support."""
     data = _payload()
+    user_id = session["user_id"]
 
     request_type = _text(data, "request_type")
     if request_type not in REQUEST_TYPES:
@@ -124,9 +139,19 @@ def create_request():
     if (item_name and len(item_name) > 150) or (category and len(category) > 100):
         return _error("item_name or category is too long.", 400)
 
+    asset_type = _text(data, "asset_type")
+    if asset_type is not None and asset_type not in ASSET_TYPES:
+        return _error("asset_type must be one of: tool, device, vehicle.", 400)
+
     quantity = 1 if data.get("quantity") is None else _int(data.get("quantity"))
     if quantity is None or quantity < 1:
         return _error("quantity must be a whole number of at least 1.", 400)
+
+    needed_by = None
+    if data.get("needed_by") is not None:
+        needed_by = _date(data.get("needed_by"))
+        if needed_by is None:
+            return _error("needed_by must be a date in YYYY-MM-DD format.", 400)
 
     asset_id = None
     if data.get("asset_id") is not None:
@@ -150,24 +175,26 @@ def create_request():
 
     with connect_database() as connection:
         if asset_id is not None:
-            exists = connection.execute(
-                f"SELECT 1 FROM {ASSETS} WHERE asset_id = %s", (asset_id,)
+            asset = connection.execute(
+                f"SELECT asset_type FROM {ASSETS} WHERE asset_id = %s", (asset_id,)
             ).fetchone()
-            if exists is None:
+            if asset is None:
                 return _error("That asset does not exist.", 400)
+            asset_type = asset_type or asset["asset_type"]
 
         created = connection.execute(
             f"""
             INSERT INTO {REQUESTS}
-                (request_type, requested_by, project_id, asset_id, item_name,
-                 category, quantity, amount, reason)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (request_type, requested_by, project_id, asset_id, asset_type,
+                 item_name, category, quantity, amount, needed_by, reason)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING request_id
             """,
-            (request_type, session["user_id"], project_id, asset_id, item_name,
-             category, quantity, amount, reason),
+            (request_type, user_id, project_id, asset_id, asset_type, item_name,
+             category, quantity, amount, needed_by, reason),
         ).fetchone()
         new_id = created["request_id"]
+        record_event(connection, "request", new_id, "submitted", "Request submitted.", user_id)
 
         procurement = None
         if request_type == "asset":
@@ -176,20 +203,34 @@ def create_request():
                 connection, asset_id=asset_id, item_name=item_name,
                 category=category, quantity=quantity,
             )
-            if not stock["available"]:
+            if stock["available"]:
+                record_event(
+                    connection, "request", new_id, "pending",
+                    "Item available. Sent to the store manager.",
+                )
+            else:
                 procurement = convert_to_procurement(
-                    connection, new_id, raised_by=session["user_id"]
+                    connection, new_id, raised_by=user_id,
+                    request_note="Item is not available. Procurement request created.",
                 )
         else:
             # Money and project requests go up to an approver.
-            approver_id = pick_approver(connection, session["role"], session["user_id"])
+            approver_id = pick_approver(connection, session["role"], user_id)
             if approver_id is not None:
                 escalate_request(connection, new_id, approver_id)
+            else:
+                record_event(
+                    connection, "request", new_id, "pending",
+                    "Waiting for an approver to be available.",
+                )
 
-        # TODO: audit log + notify the approver once those services exist.
+        # TODO: notify the approver / store manager once notifications exist.
         row = connection.execute(
             f"{REQUEST_SELECT} WHERE r.request_id = %s", (new_id,)
         ).fetchone()
+        attach_history(connection, "request", [row], "request_id")
+        if procurement is not None:
+            attach_history(connection, "procurement", [procurement], "procurement_id")
 
     return jsonify(request=row, procurement=procurement), 201
 
@@ -221,6 +262,7 @@ def list_requests():
             "ORDER BY r.created_at DESC, r.request_id DESC LIMIT 200",
             params,
         ).fetchall()
+        attach_history(connection, "request", rows, "request_id")
 
     return jsonify(requests=rows), 200
 
@@ -235,9 +277,10 @@ def get_request(request_id):
             f"{REQUEST_SELECT} WHERE r.request_id = %s AND {condition}",
             (request_id, *params),
         ).fetchone()
+        if row is None:
+            return _error("Request not found.", 404)
+        attach_history(connection, "request", [row], "request_id")
 
-    if row is None:
-        return _error("Request not found.", 404)
     return jsonify(request=row), 200
 
 
@@ -273,7 +316,7 @@ def fulfil_request(request_id):
             return _error("Choose an asset to hand over (asset_id).", 400)
 
         asset = connection.execute(
-            f"SELECT status FROM {ASSETS} WHERE asset_id = %s FOR UPDATE",
+            f"SELECT name, status FROM {ASSETS} WHERE asset_id = %s FOR UPDATE",
             (asset_id,),
         ).fetchone()
         if asset is None:
@@ -303,9 +346,14 @@ def fulfil_request(request_id):
             """,
             (asset_id, session["user_id"], request_id),
         )
-        # TODO: audit log + notify the requester once those services exist.
+        record_event(
+            connection, "request", request_id, "fulfilled",
+            f"Issued: {asset['name']}.", session["user_id"],
+        )
+        # TODO: notify the requester once notifications exist.
         row = connection.execute(
             f"{REQUEST_SELECT} WHERE r.request_id = %s", (request_id,)
         ).fetchone()
+        attach_history(connection, "request", [row], "request_id")
 
     return jsonify(request=row), 200

@@ -3,6 +3,7 @@
 Store managers and admins create and manage procurements; managers can read
 them. A procurement starts as a draft (often created automatically from an
 unavailable asset request), is filled in, then submitted for approval.
+Every response includes the procurement's history (the status timeline).
 
 Register in app.py:
     app.register_blueprint(procurement_bp, url_prefix="/procurements")
@@ -15,7 +16,11 @@ from flask import Blueprint, jsonify, request, session
 
 from ..admin_accounts import connect_database
 from ..auth import roles_required
-from ..services.request_workflow import convert_to_procurement
+from ..services.request_workflow import (
+    attach_history,
+    convert_to_procurement,
+    record_event,
+)
 
 procurement_bp = Blueprint("procurement", __name__)
 
@@ -29,21 +34,22 @@ WRITE_ROLES = ("admin", "store_manager")
 PROCUREMENT_STATUSES = {
     "draft", "pending_approval", "approved", "rejected", "purchased", "cancelled",
 }
+ASSET_TYPES = {"tool", "device", "vehicle"}
 CONVERTIBLE_REQUEST_STATUSES = ("pending", "approved")
 MAX_COST = Decimal("9999999999.99")  # fits NUMERIC(12,2)
 TEXT_LIMITS = {"item_name": 150, "category": 100, "supplier": 150, "reason": 2000}
 
-# action -> (statuses it can start from, status it moves to)
+# action -> (statuses it can start from, status it moves to, history note)
 ACTIONS = {
-    "submit": (("draft",), "pending_approval"),
-    "cancel": (("draft", "pending_approval"), "cancelled"),
-    "purchased": (("approved",), "purchased"),
+    "submit": (("draft",), "pending_approval", "Sent to approver."),
+    "cancel": (("draft", "pending_approval"), "cancelled", "Cancelled."),
+    "purchased": (("approved",), "purchased", "Marked as purchased."),
 }
 
 PROCUREMENT_SELECT = f"""
 SELECT p.procurement_id, p.request_id, p.raised_by, u.username AS raised_by_name,
-       p.item_name, p.category, p.quantity, p.estimated_cost, p.supplier,
-       p.reason, p.status, p.created_at, p.updated_at
+       p.item_name, p.asset_type, p.category, p.quantity, p.estimated_cost,
+       p.supplier, p.reason, p.status, p.created_at, p.updated_at
 FROM {PROCUREMENT} p
 JOIN {USERS} u ON u.user_id = p.raised_by
 """
@@ -93,6 +99,10 @@ def _clean_fields(data):
         if not isinstance(value, str) or not value.strip() or len(value.strip()) > limit:
             return None, f"{key} must be non-empty text of at most {limit} characters."
         fields[key] = value.strip()
+    if data.get("asset_type") is not None:
+        if data["asset_type"] not in ASSET_TYPES:
+            return None, "asset_type must be one of: tool, device, vehicle."
+        fields["asset_type"] = data["asset_type"]
     if data.get("quantity") is not None:
         quantity = _int(data["quantity"])
         if quantity is None or quantity < 1:
@@ -124,6 +134,7 @@ def list_procurements():
             "ORDER BY p.created_at DESC, p.procurement_id DESC LIMIT 200",
             params,
         ).fetchall()
+        attach_history(connection, "procurement", rows, "procurement_id")
     return jsonify(procurements=rows), 200
 
 
@@ -135,8 +146,9 @@ def get_procurement(procurement_id):
         row = connection.execute(
             f"{PROCUREMENT_SELECT} WHERE p.procurement_id = %s", (procurement_id,)
         ).fetchone()
-    if row is None:
-        return _error("Procurement not found.", 404)
+        if row is None:
+            return _error("Procurement not found.", 404)
+        attach_history(connection, "procurement", [row], "procurement_id")
     return jsonify(procurement=row), 200
 
 
@@ -145,10 +157,11 @@ def get_procurement(procurement_id):
 def create_procurement():
     """Create a draft procurement, directly or from an unfulfilled asset request.
 
-    Body: item_name (required unless request_id is given), category, quantity,
-    estimated_cost, supplier, reason, and optionally request_id.
+    Body: item_name (required unless request_id is given), asset_type, category,
+    quantity, estimated_cost, supplier, reason, and optionally request_id.
     """
     data = _payload()
+    user_id = session["user_id"]
     fields, problem = _clean_fields(data)
     if problem:
         return _error(problem, 400)
@@ -176,26 +189,33 @@ def create_procurement():
                 if found["status"] not in CONVERTIBLE_REQUEST_STATUSES:
                     return _error(f"A {found['status']} request cannot be converted.", 409)
                 created = convert_to_procurement(
-                    connection, request_id, raised_by=session["user_id"], **fields
+                    connection, request_id, raised_by=user_id, actor_id=user_id,
+                    request_note="Store manager raised a procurement request.",
+                    **fields,
                 )
             else:
                 created = connection.execute(
                     f"""
                     INSERT INTO {PROCUREMENT}
-                        (raised_by, item_name, category, quantity,
+                        (raised_by, item_name, asset_type, category, quantity,
                          estimated_cost, supplier, reason)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING procurement_id
                     """,
-                    (session["user_id"], fields["item_name"], fields.get("category"),
-                     fields.get("quantity", 1), fields.get("estimated_cost"),
-                     fields.get("supplier"), fields.get("reason")),
+                    (user_id, fields["item_name"], fields.get("asset_type"),
+                     fields.get("category"), fields.get("quantity", 1),
+                     fields.get("estimated_cost"), fields.get("supplier"),
+                     fields.get("reason")),
                 ).fetchone()
-            # TODO: audit log once that service exists.
+                record_event(
+                    connection, "procurement", created["procurement_id"], "draft",
+                    "Procurement request created.", user_id,
+                )
             row = connection.execute(
                 f"{PROCUREMENT_SELECT} WHERE p.procurement_id = %s",
                 (created["procurement_id"],),
             ).fetchone()
+            attach_history(connection, "procurement", [row], "procurement_id")
     except psycopg.errors.UniqueViolation:
         return _error("That request already has a procurement.", 409)
 
@@ -213,6 +233,7 @@ def update_procurement(procurement_id):
       purchased approved -> purchased
     """
     data = _payload()
+    user_id = session["user_id"]
     fields, problem = _clean_fields(data)
     if problem:
         return _error(problem, 400)
@@ -236,8 +257,9 @@ def update_procurement(procurement_id):
             return _error("Only draft procurements can be edited.", 409)
 
         new_status = None
+        note = None
         if action is not None:
-            allowed_from, new_status = ACTIONS[action]
+            allowed_from, new_status, note = ACTIONS[action]
             if current["status"] not in allowed_from:
                 return _error(
                     f"A {current['status']} procurement cannot use the '{action}' action.", 409
@@ -257,10 +279,18 @@ def update_procurement(procurement_id):
             f"UPDATE {PROCUREMENT} SET {', '.join(sets)} WHERE procurement_id = %s",
             (*params, procurement_id),
         )
+        if fields:
+            record_event(
+                connection, "procurement", procurement_id, current["status"],
+                "Details updated.", user_id,
+            )
+        if new_status:
+            record_event(connection, "procurement", procurement_id, new_status, note, user_id)
         # TODO: on submit, create the approval record (Member 5) and notify the
-        # approver; also audit log every change once those services exist.
+        # approver once those exist.
         row = connection.execute(
             f"{PROCUREMENT_SELECT} WHERE p.procurement_id = %s", (procurement_id,)
         ).fetchone()
+        attach_history(connection, "procurement", [row], "procurement_id")
 
     return jsonify(procurement=row), 200
