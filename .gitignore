@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.py[cod]
+backend/nexus.db
+.pytest_cache/
+.coverage
