@@ -14,6 +14,12 @@ from flask import Blueprint, jsonify, request, session
 
 from ..admin_accounts import connect_database
 from ..auth import roles_required
+from ..services.request_workflow import (
+    check_stock,
+    convert_to_procurement,
+    escalate_request,
+    pick_approver,
+)
 
 requests_bp = Blueprint("requests", __name__)
 
@@ -161,12 +167,31 @@ def create_request():
             (request_type, session["user_id"], project_id, asset_id, item_name,
              category, quantity, amount, reason),
         ).fetchone()
+        new_id = created["request_id"]
+
+        procurement = None
+        if request_type == "asset":
+            # Not in the store? Start a procurement draft automatically.
+            stock = check_stock(
+                connection, asset_id=asset_id, item_name=item_name,
+                category=category, quantity=quantity,
+            )
+            if not stock["available"]:
+                procurement = convert_to_procurement(
+                    connection, new_id, raised_by=session["user_id"]
+                )
+        else:
+            # Money and project requests go up to an approver.
+            approver_id = pick_approver(connection, session["role"], session["user_id"])
+            if approver_id is not None:
+                escalate_request(connection, new_id, approver_id)
+
         # TODO: audit log + notify the approver once those services exist.
         row = connection.execute(
-            f"{REQUEST_SELECT} WHERE r.request_id = %s", (created["request_id"],)
+            f"{REQUEST_SELECT} WHERE r.request_id = %s", (new_id,)
         ).fetchone()
 
-    return jsonify(request=row), 201
+    return jsonify(request=row, procurement=procurement), 201
 
 
 @requests_bp.get("")
