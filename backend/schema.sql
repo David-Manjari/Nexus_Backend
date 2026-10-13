@@ -1,3 +1,4 @@
+
 CREATE TABLE IF NOT EXISTS "Users" (
     user_id        SERIAL PRIMARY KEY,
     username       VARCHAR(64)  NOT NULL UNIQUE,
@@ -14,14 +15,45 @@ CREATE TABLE IF NOT EXISTS "Projects" (
     project_id   SERIAL PRIMARY KEY,
     name         VARCHAR(200) NOT NULL,
     description  TEXT,
-    status       VARCHAR(20)  NOT NULL DEFAULT 'planned'
-                 CHECK (status IN ('planned', 'active', 'on_hold', 'completed')),
-    manager_id   INTEGER NOT NULL REFERENCES "Users"(user_id),
+    status       VARCHAR(24) NOT NULL DEFAULT 'draft'
+                 CHECK (status IN (
+                     'planned', 'draft', 'pending_approval', 'approved', 'active',
+                     'on_hold', 'completed', 'cancelled', 'rejected'
+                 )),
+    manager_id   INTEGER REFERENCES "Users"(user_id),   -- william's column
+    created_by   INTEGER NOT NULL REFERENCES "Users"(user_id),  -- main's column
     start_date   DATE,
-    due_date     DATE,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    due_date     DATE,                                  -- william's column
+    end_date     DATE,                                  -- main's column
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (end_date IS NULL OR start_date IS NULL OR end_date >= start_date)
 );
+CREATE OR REPLACE FUNCTION projects_sync_compat() RETURNS trigger AS $$
+BEGIN
+    IF NEW.created_by IS NULL THEN NEW.created_by := NEW.manager_id; END IF;
+    IF NEW.manager_id IS NULL THEN NEW.manager_id := NEW.created_by; END IF;
 
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.end_date IS NULL THEN NEW.end_date := NEW.due_date; END IF;
+        IF NEW.due_date IS NULL THEN NEW.due_date := NEW.end_date; END IF;
+    ELSE
+        IF NEW.end_date IS DISTINCT FROM OLD.end_date THEN
+            NEW.due_date := NEW.end_date;
+        ELSIF NEW.due_date IS DISTINCT FROM OLD.due_date THEN
+            NEW.end_date := NEW.due_date;
+        END IF;
+    END IF;
+
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS projects_sync_compat_trg ON "Projects";
+CREATE TRIGGER projects_sync_compat_trg
+    BEFORE INSERT OR UPDATE ON "Projects"
+    FOR EACH ROW EXECUTE FUNCTION projects_sync_compat();
 CREATE TABLE IF NOT EXISTS "Tasks" (
     task_id      SERIAL PRIMARY KEY,
     project_id   INTEGER NOT NULL REFERENCES "Projects"(project_id) ON DELETE CASCADE,
@@ -147,3 +179,47 @@ CREATE TABLE IF NOT EXISTS "Audit_Log" (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS audit_log_created_idx ON "Audit_Log"(created_at);
+-- Project tracking and sequential approval workflow.
+-- The Users table is provisioned by the account setup component.
+
+CREATE TABLE IF NOT EXISTS "Approval_Requests" (
+	approval_id    SERIAL PRIMARY KEY,
+	project_id     INTEGER NOT NULL REFERENCES "Projects"(project_id) ON DELETE CASCADE,
+	round_number   INTEGER NOT NULL CHECK (round_number > 0),
+	step_order     INTEGER NOT NULL CHECK (step_order > 0),
+	approver_id    INTEGER NOT NULL REFERENCES "Users"(user_id),
+	status         VARCHAR(12) NOT NULL DEFAULT 'waiting'
+				   CHECK (status IN ('waiting', 'pending', 'approved', 'rejected', 'skipped')),
+	comments       TEXT,
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	decided_at     TIMESTAMPTZ,
+	UNIQUE (project_id, round_number, step_order),
+	UNIQUE (project_id, round_number, approver_id)
+);
+
+CREATE TABLE IF NOT EXISTS "Project_Status_History" (
+	history_id   SERIAL PRIMARY KEY,
+	project_id   INTEGER NOT NULL REFERENCES "Projects"(project_id) ON DELETE CASCADE,
+	from_status  VARCHAR(24),
+	to_status    VARCHAR(24) NOT NULL CHECK (to_status IN (
+					 'draft', 'pending_approval', 'approved', 'active',
+					 'on_hold', 'completed', 'cancelled', 'rejected'
+				 )),
+	changed_by   INTEGER NOT NULL REFERENCES "Users"(user_id),
+	reason       TEXT,
+	changed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	CHECK (from_status IS NULL OR from_status IN (
+		'draft', 'pending_approval', 'approved', 'active',
+		'on_hold', 'completed', 'cancelled', 'rejected'
+	))
+);
+
+CREATE INDEX IF NOT EXISTS projects_status_idx ON "Projects"(status);
+CREATE INDEX IF NOT EXISTS projects_created_by_idx ON "Projects"(created_by);
+CREATE INDEX IF NOT EXISTS approvals_inbox_idx
+	ON "Approval_Requests"(approver_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS approvals_project_round_idx
+	ON "Approval_Requests"(project_id, round_number, step_order);
+CREATE INDEX IF NOT EXISTS project_status_history_idx
+	ON "Project_Status_History"(project_id, changed_at DESC);
+
