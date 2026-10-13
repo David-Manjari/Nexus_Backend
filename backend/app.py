@@ -8,6 +8,8 @@ from .routes.audit import audit_bp
 from .routes.sessions import sessions_bp
 from .routes.users import users_bp
 from .routes.assets import assets_bp, assignments_bp
+from .routes.requests import requests_bp
+from .routes.procurement import procurement_bp
 
 
 def create_app(*, secret_key=None):
@@ -25,4 +27,6 @@ def create_app(*, secret_key=None):
     app.register_blueprint(sessions_bp, url_prefix="/session")
     app.register_blueprint(audit_bp, url_prefix="/audit")
     app.register_blueprint(users_bp, url_prefix="/users")
+    app.register_blueprint(requests_bp, url_prefix="/requests")
+    app.register_blueprint(procurement_bp, url_prefix="/procurements")
     return app
