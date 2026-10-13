@@ -9,7 +9,7 @@ from .db import connect_database
 
 ROLES = ("admin", "manager", "store_manager", "staff")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
-MIN_PASSWORD_LENGTH = 12
+MIN_PASSWORD_LENGTH = 5
 BOOTSTRAP_LOCK_ID = 726381942105
 
 
