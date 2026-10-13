@@ -13,23 +13,24 @@ import uuid
 from datetime import date
 
 from flask import Blueprint, jsonify, request, send_from_directory, session
+from psycopg.types.json import Jsonb
 from werkzeug.utils import secure_filename
 
-from ..admin_accounts import connect_database
+from ..db import connect_database
 from ..auth import roles_required
 
 assets_bp = Blueprint("assets", __name__)
 assignments_bp = Blueprint("assignments", __name__)
 
 # ---------------------------------------------------------------------------
-# Roles come from ROLES in admin_accounts.py
+# Table names match schema.sql. Roles come from ROLES in admin_accounts.py.
 # ---------------------------------------------------------------------------
 ASSETS = '"Assets"'
 VEHICLES = '"Vehicle_Details"'
 ASSIGNMENTS = '"Asset_Assignments"'
 USERS = '"Users"'
 
-WRITE_ROLES = ("store_manager","admin")
+WRITE_ROLES = ("store_manager",)
 READ_ROLES = ("admin", "manager", "store_manager", "staff")
 
 ASSET_TYPES = {"tool", "device", "vehicle"}
@@ -107,6 +108,23 @@ def _save_image(file):
     filename = secure_filename(f"{uuid.uuid4().hex}.{extension}")
     file.save(os.path.join(UPLOAD_DIR, filename))
     return filename, None
+
+
+def _audit(connection, action, asset_id, details=None):
+    """Write one row to the shared Audit_Log table, inside the caller's transaction."""
+    connection.execute(
+        'INSERT INTO "Audit_Log" (user_id, action, entity_type, entity_id, details) '
+        "VALUES (%s, %s, 'asset', %s, %s)",
+        (session["user_id"], action, asset_id, Jsonb(details or {})),
+    )
+
+
+def _notify(connection, user_id, message, notif_type="asset_assigned"):
+    """Insert an in-app notification. Swap for services.notifications once it exists."""
+    connection.execute(
+        'INSERT INTO "Notifications" (user_id, message, notif_type) VALUES (%s, %s, %s)',
+        (user_id, message, notif_type),
+    )
 
 
 def _remove_image(filename):
@@ -207,7 +225,7 @@ def create_asset():
                         VALUES (%s, %s, %s, %s, %s)""",
                     (asset_id, *vehicle),
                 )
-            # TODO: call services.audit when Member 1 pushes it (action="asset_created")
+            _audit(connection, "asset_created", asset_id, {"name": name, "asset_type": asset_type})
             row = connection.execute(
                 ASSET_SELECT + " WHERE a.asset_id = %s", (asset_id,)
             ).fetchone()
@@ -292,7 +310,10 @@ def update_asset(asset_id):
                 )
             if image_name:
                 old_image = current["image_path"]
-            # TODO: call services.audit (action="asset_updated")
+            _audit(
+                connection, "asset_updated", asset_id,
+                {"fields": sorted([*asset_fields, *vehicle_fields])},
+            )
             row = connection.execute(
                 ASSET_SELECT + " WHERE a.asset_id = %s", (asset_id,)
             ).fetchone()
@@ -355,7 +376,7 @@ def assign_asset(asset_id):
 
     with connect_database() as connection:
         asset = connection.execute(
-            f"SELECT status FROM {ASSETS} WHERE asset_id = %s FOR UPDATE", (asset_id,)
+            f"SELECT name, status FROM {ASSETS} WHERE asset_id = %s FOR UPDATE", (asset_id,)
         ).fetchone()
         if asset is None:
             return _error("Asset not found.", 404)
@@ -378,8 +399,11 @@ def assign_asset(asset_id):
         connection.execute(
             f"UPDATE {ASSETS} SET status = 'assigned' WHERE asset_id = %s", (asset_id,)
         )
-        # TODO: call services.notifications (tell user_id they were assigned this asset)
-        # TODO: call services.audit (action="asset_assigned")
+        _audit(
+            connection, "asset_assigned", asset_id,
+            {"assigned_to": user_id, "assignment_id": assignment_id, "request_id": request_id},
+        )
+        _notify(connection, user_id, f"You were assigned: {asset['name']}.")
 
     return jsonify(message="Asset assigned.", assignment_id=assignment_id), 201
 
@@ -426,6 +450,10 @@ def return_asset(assignment_id):
                 WHERE asset_id = %s""",
             ("maintenance" if to_maintenance else "available", return_condition, assignment["asset_id"]),
         )
-        # TODO: call services.audit (action="asset_returned")
+        _audit(
+            connection, "asset_returned", assignment["asset_id"],
+            {"assignment_id": assignment_id, "return_condition": return_condition,
+             "to_maintenance": to_maintenance},
+        )
 
     return jsonify(message="Asset returned."), 200
