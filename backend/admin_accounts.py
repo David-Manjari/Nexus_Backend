@@ -3,23 +3,14 @@ import os
 import re
 from getpass import getpass
 
-import psycopg
-from psycopg.rows import dict_row
 from werkzeug.security import generate_password_hash
+from .db import connect_database
 
 
 ROLES = ("admin", "manager", "store_manager", "staff")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
 MIN_PASSWORD_LENGTH = 12
 BOOTSTRAP_LOCK_ID = 726381942105
-
-
-def connect_database(database_url=None):
-    """Connect to the existing PostgreSQL database configured by DATABASE_URL."""
-    database_url = database_url or os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("DATABASE_URL must be set")
-    return psycopg.connect(database_url, connect_timeout=10, row_factory=dict_row)
 
 
 def _validate_account(username, email, password, role):
