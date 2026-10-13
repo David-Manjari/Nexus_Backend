@@ -1,10 +1,16 @@
 import uuid
+from decimal import Decimal, InvalidOperation
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, session
 
-from backend.db import get_db
-from backend.services.audit import record_audit, get_audit_history
-from backend.services.workflow import process_disbursement
+from ..auth import roles_required
+from ..db import connect_database
+from ..services.audit import (
+    get_audit_history,
+    get_payment_history,
+    record_audit,
+)
+from ..services.disbursements import process_disbursement
 
 disbursements_bp = Blueprint(
     "disbursements",
@@ -12,74 +18,74 @@ disbursements_bp = Blueprint(
     url_prefix="/api",
 )
 
-VALID_STATUSES = {"pending", "processing", "paid", "failed"}
+VALID_STATUSES = {"pending", "processing", "success", "paid", "failed"}
+READ_ROLES = ("admin", "manager")
+WRITE_ROLES = ("admin", "manager")
+MAX_AMOUNT = Decimal("9999999999.99")
+
+
+def _payload():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _amount(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not amount.is_finite() or amount <= 0 or amount > MAX_AMOUNT:
+        return None
+    return amount.quantize(Decimal("0.01"))
+
 
 @disbursements_bp.get("/disbursements")
+@roles_required(*READ_ROLES)
 def list_disbursements():
     status = request.args.get("status")
-    connection = get_db()
+    if status and status not in VALID_STATUSES:
+        return jsonify(error="Invalid payout status."), 400
 
-    try:
-        if status:
-            if status not in VALID_STATUSES:
-                return jsonify(error="Invalid payout status."), 400
+    query = 'SELECT * FROM "Disbursements"'
+    params = ()
+    if status:
+        query += " WHERE status = %s"
+        params = (status,)
+    query += " ORDER BY created_at DESC, disbursement_id DESC"
 
-            rows = connection.execute(
-                """
-                SELECT * FROM disbursements
-                WHERE status = ?
-                ORDER BY created_at DESC, id DESC
-                """,
-                (status,),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                """
-                SELECT * FROM disbursements
-                ORDER BY created_at DESC, id DESC
-                """
-            ).fetchall()
+    with connect_database() as connection:
+        rows = connection.execute(query, params).fetchall()
+    return jsonify([dict(row) for row in rows]), 200
 
-        return jsonify([dict(row) for row in rows]), 200
-    finally:
-        connection.close()
 
 @disbursements_bp.get("/disbursements/summary")
+@roles_required(*READ_ROLES)
 def disbursement_summary():
-    connection = get_db()
-
-    try:
+    with connect_database() as connection:
         rows = connection.execute(
-            """
-            SELECT status, COUNT(*) AS count,
-                   COALESCE(SUM(amount), 0) AS total
-            FROM disbursements
-            GROUP BY status
-            """
+            '''SELECT status, COUNT(*) AS count,
+                      COALESCE(SUM(amount), 0) AS total
+               FROM "Disbursements"
+               GROUP BY status'''
         ).fetchall()
 
-        summary = {
-            status: {"count": 0, "total": 0.0}
-            for status in VALID_STATUSES
-        }
+    summary = {status: {"count": 0, "total": 0} for status in VALID_STATUSES}
+    for row in rows:
+        summary[row["status"]] = {"count": row["count"], "total": row["total"]}
+    return jsonify(summary), 200
 
-        for row in rows:
-            summary[row["status"]] = {
-                "count": row["count"],
-                "total": row["total"],
-            }
-
-        return jsonify(summary), 200
-    finally:
-        connection.close()
 
 @disbursements_bp.post("/disbursements")
+@roles_required(*WRITE_ROLES)
 def create_disbursement():
-    data = request.get_json(silent=True) or {}
+    data = _payload()
 
     payee = data.get("payee")
     description = data.get("description", "")
     currency = data.get("currency", "KES")
+    amount = _amount(data.get("amount"))
 
     if not isinstance(payee, str) or not payee.strip():
         return jsonify(error="A payee name is required."), 400
@@ -90,75 +96,45 @@ def create_disbursement():
     if not isinstance(currency, str) or not currency.strip():
         return jsonify(error="A currency is required."), 400
 
-    try:
-        amount = float(data.get("amount"))
-    except (TypeError, ValueError):
-        return jsonify(error="Amount must be a valid number."), 400
-
-    if amount <= 0 or amount != amount or amount == float("inf"):
+    if amount is None:
         return jsonify(error="Amount must be a finite positive number."), 400
 
     reference = "NEX-" + uuid.uuid4().hex[:10].upper()
-    connection = get_db()
-
-    try:
-        cursor = connection.execute(
-            """
-            INSERT INTO disbursements
-                (reference, payee, amount, currency, description)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                reference,
-                payee.strip(),
-                amount,
-                currency.strip().upper(),
-                description.strip(),
-            ),
-        )
-        disbursement_id = cursor.lastrowid
-
-        connection.execute(
-            """
-            INSERT INTO audit_logs (disbursement_id, action, details)
-            VALUES (?, 'payout_created', ?)
-            """,
-            (disbursement_id, f"Payout created for {payee.strip()}."),
-        )
-        connection.commit()
-
+    with connect_database() as connection:
         row = connection.execute(
-            "SELECT * FROM disbursements WHERE id = ?",
-            (disbursement_id,),
+            '''INSERT INTO "Disbursements"
+                   (reference, payee, amount, currency, description)
+               VALUES (%s, %s, %s, %s, %s)
+               RETURNING *''',
+            (reference, payee.strip(), amount, currency.strip().upper(), description.strip()),
         ).fetchone()
+        record_audit(
+            row["disbursement_id"],
+            "payout_created",
+            f"Payout created for {payee.strip()}.",
+            user_id=session["user_id"],
+            connection=connection,
+        )
+    return jsonify(dict(row)), 201
 
-        return jsonify(dict(row)), 201
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
 
 @disbursements_bp.get("/disbursements/<int:disbursement_id>")
+@roles_required(*READ_ROLES)
 def get_disbursement(disbursement_id):
-    connection = get_db()
-
-    try:
+    with connect_database() as connection:
         row = connection.execute(
-            "SELECT * FROM disbursements WHERE id = ?",
+            'SELECT * FROM "Disbursements" WHERE disbursement_id = %s',
             (disbursement_id,),
         ).fetchone()
+    if row is None:
+        return jsonify(error="Disbursement not found."), 404
+    return jsonify(dict(row)), 200
 
-        if row is None:
-            return jsonify(error="Disbursement not found."), 404
-
-        return jsonify(dict(row)), 200
-    finally:
-        connection.close()
 
 @disbursements_bp.post("/disbursements/<int:disbursement_id>/process")
+@roles_required(*WRITE_ROLES)
 def process_payout(disbursement_id):
-    data = request.get_json(silent=True) or {}
+    data = _payload()
     simulated_result = data.get("simulated_result", "paid")
 
     if simulated_result not in ("paid", "failed"):
@@ -170,6 +146,7 @@ def process_payout(disbursement_id):
         payout, result = process_disbursement(
             disbursement_id,
             simulated_result,
+            user_id=session["user_id"],
         )
         return jsonify(
             disbursement=payout,
@@ -180,47 +157,28 @@ def process_payout(disbursement_id):
     except ValueError as error:
         return jsonify(error=str(error)), 409
 
-@disbursements_bp.get("/disbursements/<int:disbursement_id>/history")
-def disbursement_history(disbursement_id):
-    connection = get_db()
 
-    try:
+@disbursements_bp.get("/disbursements/<int:disbursement_id>/history")
+@roles_required(*READ_ROLES)
+def disbursement_history(disbursement_id):
+    with connect_database() as connection:
         exists = connection.execute(
-            "SELECT id FROM disbursements WHERE id = ?",
+            'SELECT 1 FROM "Disbursements" WHERE disbursement_id = %s',
             (disbursement_id,),
         ).fetchone()
-
         if exists is None:
             return jsonify(error="Disbursement not found."), 404
+        payments = get_payment_history(disbursement_id, connection=connection)
+        audit = get_audit_history(disbursement_id, connection=connection)
+    return jsonify(payments=payments, audit=audit), 200
 
-        payments = connection.execute(
-            """
-            SELECT * FROM payment_history
-            WHERE disbursement_id = ?
-            ORDER BY created_at DESC, id DESC
-            """,
-            (disbursement_id,),
-        ).fetchall()
-
-        return jsonify(
-            payments=[dict(row) for row in payments],
-            audit=get_audit_history(disbursement_id),
-        ), 200
-    finally:
-        connection.close()
 
 @disbursements_bp.get("/payment-history")
+@roles_required(*READ_ROLES)
 def payment_history():
-    connection = get_db()
-
-    try:
+    with connect_database() as connection:
         rows = connection.execute(
-            """
-            SELECT * FROM payment_history
-            ORDER BY created_at DESC, id DESC
-            """
+            '''SELECT * FROM "Payment_History"
+               ORDER BY created_at DESC, history_id DESC'''
         ).fetchall()
-
-        return jsonify([dict(row) for row in rows]), 200
-    finally:
-        connection.close()
+    return jsonify([dict(row) for row in rows]), 200
