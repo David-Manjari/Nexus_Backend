@@ -17,7 +17,10 @@ PROJECT_FIELDS = {"name", "description", "start_date", "end_date"}
 PROJECT_STATUSES = {
 	"approved", "active", "on_hold", "completed", "cancelled"
 }
+EDITABLE_PROJECT_STATUSES = {"draft", "planned"}
+SUBMITTABLE_PROJECT_STATUSES = {"draft", "planned", "rejected"}
 STATUS_TRANSITIONS = {
+	"planned": {"cancelled"},
 	"approved": {"active", "cancelled"},
 	"active": {"on_hold", "completed", "cancelled"},
 	"on_hold": {"active", "completed", "cancelled"},
@@ -152,8 +155,8 @@ def update_project(project_id, data, user_id, role):
 
 	with connect_database() as connection:
 		project = _project_for_user(connection, project_id, user_id, role, lock=True)
-		if project["status"] != "draft":
-			raise WorkflowError("Only draft projects can be edited.", 409)
+		if project["status"] not in EDITABLE_PROJECT_STATUSES:
+			raise WorkflowError("Only draft or planned projects can be edited.", 409)
 		start_date = fields.get("start_date", project["start_date"])
 		end_date = fields.get("end_date", project["end_date"])
 		if start_date and end_date and end_date < start_date:
@@ -176,8 +179,10 @@ def submit_project(project_id, approver_ids, user_id, role):
 
 	with connect_database() as connection:
 		project = _project_for_user(connection, project_id, user_id, role, lock=True)
-		if project["status"] not in ("draft", "rejected"):
-			raise WorkflowError("Only draft or rejected projects can be submitted.", 409)
+		if project["status"] not in SUBMITTABLE_PROJECT_STATUSES:
+			raise WorkflowError(
+				"Only draft, planned or rejected projects can be submitted.", 409
+			)
 		approvers = connection.execute(
 			'''SELECT user_id, role FROM "Users"
 			   WHERE user_id = ANY(%s)''',
@@ -329,3 +334,4 @@ def decide_approval(approval_id, approver_id, decision, comments=None):
 			comments,
 		)
 	return {"project": result, "decision": decision}
+
