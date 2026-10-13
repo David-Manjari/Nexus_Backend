@@ -1,4 +1,3 @@
-
 CREATE TABLE IF NOT EXISTS "Users" (
     user_id        SERIAL PRIMARY KEY,
     username       VARCHAR(64)  NOT NULL UNIQUE,
@@ -20,11 +19,11 @@ CREATE TABLE IF NOT EXISTS "Projects" (
                      'planned', 'draft', 'pending_approval', 'approved', 'active',
                      'on_hold', 'completed', 'cancelled', 'rejected'
                  )),
-    manager_id   INTEGER REFERENCES "Users"(user_id),   -- william's column
-    created_by   INTEGER NOT NULL REFERENCES "Users"(user_id),  -- main's column
+    manager_id   INTEGER REFERENCES "Users"(user_id), 
+    created_by   INTEGER NOT NULL REFERENCES "Users"(user_id),
     start_date   DATE,
-    due_date     DATE,                                  -- william's column
-    end_date     DATE,                                  -- main's column
+    due_date     DATE,                               
+    end_date     DATE,                                
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (end_date IS NULL OR start_date IS NULL OR end_date >= start_date)
@@ -146,16 +145,49 @@ CREATE TABLE IF NOT EXISTS "Approvals" (
 );
 
 CREATE TABLE IF NOT EXISTS "Disbursements" (
-    disbursement_id  SERIAL PRIMARY KEY,
-    procurement_id   INTEGER NOT NULL UNIQUE REFERENCES "Procurements"(procurement_id),
-    amount           NUMERIC(12, 2) NOT NULL CHECK (amount >= 0),
-    status           VARCHAR(12) NOT NULL DEFAULT 'pending'
-                     CHECK (status IN ('pending', 'processing', 'success', 'failed')),
-    paid_by          INTEGER REFERENCES "Users"(user_id),
-    paid_at          TIMESTAMPTZ,
-    receipt_ref      VARCHAR(100),
+    disbursement_id    SERIAL PRIMARY KEY,
+    procurement_id     INTEGER UNIQUE REFERENCES "Procurements"(procurement_id),
+    reference          VARCHAR(100) UNIQUE,
+    payee              VARCHAR(200),
+    amount             NUMERIC(12, 2) NOT NULL CHECK (amount >= 0),
+    currency           VARCHAR(3) NOT NULL DEFAULT 'KES',
+    description        TEXT NOT NULL DEFAULT '',
+    status             VARCHAR(12) NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'processing', 'success', 'paid', 'failed')),
+    payment_reference  VARCHAR(100),
+    failure_reason     TEXT,
+    paid_by            INTEGER REFERENCES "Users"(user_id),
+    paid_at            TIMESTAMPTZ,
+    receipt_ref        VARCHAR(100),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (procurement_id IS NOT NULL OR (reference IS NOT NULL AND payee IS NOT NULL)),
+    CHECK (reference IS NULL OR amount > 0)
+);
+
+CREATE TABLE IF NOT EXISTS "Payment_History" (
+    history_id         SERIAL PRIMARY KEY,
+    disbursement_id    INTEGER NOT NULL REFERENCES "Disbursements"(disbursement_id) ON DELETE CASCADE,
+    reference          VARCHAR(100),
+    payment_reference  VARCHAR(100),
+    amount             NUMERIC(12, 2) NOT NULL,
+    currency           VARCHAR(3) NOT NULL,
+    status             VARCHAR(12) NOT NULL,
+    message            TEXT NOT NULL DEFAULT '',
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS "Disbursement_Audit_Logs" (
+    log_id           SERIAL PRIMARY KEY,
+    disbursement_id  INTEGER REFERENCES "Disbursements"(disbursement_id) ON DELETE SET NULL,
+    action           VARCHAR(100) NOT NULL,
+    details          TEXT NOT NULL DEFAULT '',
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS disbursements_status_idx ON "Disbursements"(status);
+CREATE INDEX IF NOT EXISTS payment_history_disbursement_idx ON "Payment_History"(disbursement_id);
+CREATE INDEX IF NOT EXISTS disbursement_audit_logs_idx ON "Disbursement_Audit_Logs"(disbursement_id);
 
 CREATE TABLE IF NOT EXISTS "Notifications" (
     notification_id  SERIAL PRIMARY KEY,
@@ -209,8 +241,8 @@ CREATE TABLE IF NOT EXISTS "Project_Status_History" (
 	reason       TEXT,
 	changed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	CHECK (from_status IS NULL OR from_status IN (
-		'draft', 'pending_approval', 'approved', 'active',
-		'on_hold', 'completed', 'cancelled', 'rejected'
+        'planned', 'draft', 'pending_approval', 'approved', 'active',
+        'on_hold', 'completed', 'cancelled', 'rejected'
 	))
 );
 
@@ -222,4 +254,5 @@ CREATE INDEX IF NOT EXISTS approvals_project_round_idx
 	ON "Approval_Requests"(project_id, round_number, step_order);
 CREATE INDEX IF NOT EXISTS project_status_history_idx
 	ON "Project_Status_History"(project_id, changed_at DESC);
+
 

@@ -1,4 +1,6 @@
+
 import os
+from pathlib import Path
 import psycopg
 from flask import jsonify
 from psycopg import errors, sql
@@ -8,7 +10,7 @@ from sqlalchemy import create_engine
 from . import config
 
 _engine = None
-
+SCHEMA_PATH = Path(__file__).resolve().with_name("schema.sql")
 
 def connect_database(database_url=None):
     database_url = database_url or os.environ.get("DATABASE_URL")
@@ -16,7 +18,11 @@ def connect_database(database_url=None):
         raise RuntimeError("DATABASE_URL must be set")
     return psycopg.connect(database_url, connect_timeout=10, row_factory=dict_row)
 
-
+def init_db():
+    """Apply the merged schema. Safe to run repeatedly (IF NOT EXISTS)."""
+    with connect_database() as connection:
+        connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+        
 def get_engine():
     global _engine
     if _engine is None:
@@ -29,7 +35,6 @@ def get_engine():
                 break
         _engine = create_engine(url, pool_pre_ping=True)
     return _engine
-
 
 def get_row(connection, table, id_column, row_id):
     query = sql.SQL("SELECT * FROM {} WHERE {} = %s").format(
@@ -92,3 +97,4 @@ def register_db_error_handlers(app):
     @app.errorhandler(psycopg.OperationalError)
     def database_unavailable(error):
         return jsonify(error="Database is not available right now."), 503
+
