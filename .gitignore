@@ -1,6 +1,17 @@
+
 .venv/
 __pycache__/
 *.py[cod]
 backend/nexus.db
+backend/uploads/
 .pytest_cache/
 .coverage
+.env
+.venv/
+dev_assets_app.py
+cookies.txt
+admin_cookies.txt
+test.png
+test.txt
+out.png
+

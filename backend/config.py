@@ -1,10 +1,11 @@
 import os
+from pathlib import Path
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+from dotenv import load_dotenv
 
-DATABASE_PATH = os.environ.get(
-    "NEXUS_DATABASE",
-    os.path.join(BASE_DIR, "nexus.db"),
-)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(REPO_ROOT / ".env")
 
-JSON_SORT_KEYS = False
+DATABASE_URL = os.environ.get("DATABASE_URL")
+SECRET_KEY = os.environ.get("SECRET_KEY")
+
