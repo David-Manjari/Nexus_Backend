@@ -19,7 +19,6 @@ def connect_database(database_url=None):
     return psycopg.connect(database_url, connect_timeout=10, row_factory=dict_row)
 
 def init_db():
-    """Apply the merged schema. Safe to run repeatedly (IF NOT EXISTS)."""
     with connect_database() as connection:
         connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
         
