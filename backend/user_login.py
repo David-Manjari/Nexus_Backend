@@ -18,7 +18,7 @@ def authenticate_user(identifier, password, *, database_url=None):
             """
             SELECT user_id, username, email, password_hash, role
             FROM "Users"
-            WHERE username = %s OR email = %s
+            WHERE (username = %s OR email = %s) AND is_active = TRUE
             LIMIT 1
             """,
             (identifier, identifier),
