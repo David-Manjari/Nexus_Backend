@@ -21,11 +21,11 @@ def roles_required(*allowed_roles):
 
             with connect_database() as connection:
                 user = connection.execute(
-                    'SELECT role FROM "Users" WHERE user_id = %s',
+                    'SELECT role, is_active FROM "Users" WHERE user_id = %s',
                     (user_id,),
                 ).fetchone()
 
-            if user is None:
+            if user is None or not user["is_active"]:
                 session.clear()
                 return jsonify(error="Authentication is required."), 401
 
