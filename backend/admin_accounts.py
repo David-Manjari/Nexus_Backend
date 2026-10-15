@@ -10,24 +10,26 @@ from .db import connect_database
 
 ROLES = ("admin", "manager", "store_manager", "staff")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
-MIN_PASSWORD_LENGTH = 5
+MIN_PASSWORD_LENGTH = 6
 BOOTSTRAP_LOCK_ID = 726381942105
 
 
 def _validate_account(username, email, password, role):
-    if not isinstance(username, str):
-        raise ValueError("Username must be 3-64 letters, digits, '.', '_' or '-'.")
-    if not isinstance(email, str):
-        raise ValueError("A valid email address is required.")
-    if not isinstance(password, str):
-        raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+    if not isinstance(username, str) or not username.strip():
+        raise ValueError("Username is required.")
+    if not isinstance(email, str) or not email.strip():
+        raise ValueError("Email is required.")
+    if not isinstance(password, str) or not password:
+        raise ValueError("Password is required.")
+    if role is None or role == "":
+        raise ValueError(f"Role is required. Choose one of: {', '.join(ROLES)}.")
     username = username.strip()
     email = email.strip()
 
     if not USERNAME_PATTERN.fullmatch(username):
-        raise ValueError("Username must be 3-64 letters, digits, '.', '_' or '-'.")
+        raise ValueError("Username must be 3-64 characters using only letters, digits, '.', '_' or '-'.")
     if not email or len(email) > 254 or "@" not in email:
-        raise ValueError("A valid email address is required.")
+        raise ValueError("Enter a valid email address.")
     if len(password) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
     if role not in ROLES:
@@ -121,11 +123,13 @@ def update_account(admin_user_id, user_id, updates, *, database_url=None):
             if not isinstance(value, str):
                 raise ValueError(f"{field.capitalize()} must be text.")
             value = value.strip()
+            if not value:
+                raise ValueError(f"{field.capitalize()} cannot be empty.")
             if field == "username":
                 if not USERNAME_PATTERN.fullmatch(value):
-                    raise ValueError("Username must be 3-64 letters, digits, '.', '_' or '-'.")
+                    raise ValueError("Username must be 3-64 characters using only letters, digits, '.', '_' or '-'.")
             elif not value or len(value) > 254 or "@" not in value:
-                raise ValueError("A valid email address is required.")
+                raise ValueError("Enter a valid email address.")
             changes[field] = value
 
     if "role" in updates:
@@ -140,7 +144,9 @@ def update_account(admin_user_id, user_id, updates, *, database_url=None):
 
     if "password" in updates:
         password = updates["password"]
-        if not isinstance(password, str) or len(password) < MIN_PASSWORD_LENGTH:
+        if not isinstance(password, str) or not password:
+            raise ValueError("Password cannot be empty.")
+        if len(password) < MIN_PASSWORD_LENGTH:
             raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
         changes["password_hash"] = generate_password_hash(password)
 

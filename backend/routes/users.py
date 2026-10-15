@@ -17,7 +17,7 @@ users_bp = Blueprint("users", __name__)
 
 
 def _payload():
-    data = request.get_json(silent=True)
+    data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
     return data if isinstance(data, dict) else {}
 
 
