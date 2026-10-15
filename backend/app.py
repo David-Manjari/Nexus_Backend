@@ -9,6 +9,7 @@ from .routes.approvals import approvals_bp
 from .routes.assets import assets_bp, assignments_bp
 from .routes.audit import audit_bp
 from .routes.disbursements import disbursements_bp
+from .routes.notifications import notifications_bp
 from .routes.procurement import procurement_bp
 from .routes.projects import projects_bp
 from .routes.requests import requests_bp
@@ -21,16 +22,27 @@ def create_app(*, secret_key=None):
     if not secret_key:
         raise RuntimeError("SECRET_KEY must be set before starting the application.")
 
+    frontend_origins = [
+        origin.strip()
+        for origin in os.environ.get(
+            "FRONTEND_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+        if origin.strip()
+    ]
+
     app = Flask(__name__)
     app.config.update(
         SECRET_KEY=secret_key,
         SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SAMESITE=os.environ.get("SESSION_COOKIE_SAMESITE", "Lax"),
+        SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true",
     )
-    CORS(app)
+    CORS(app, origins=frontend_origins, supports_credentials=True)
 
     init_db()
     app.register_blueprint(sessions_bp, url_prefix="/session")
+    app.register_blueprint(notifications_bp, url_prefix="/notifications")
     app.register_blueprint(approvals_bp, url_prefix="/approvals")
     app.register_blueprint(audit_bp, url_prefix="/audit")
     app.register_blueprint(users_bp, url_prefix="/users")

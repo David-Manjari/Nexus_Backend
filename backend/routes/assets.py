@@ -44,9 +44,15 @@ UPLOAD_DIR = os.path.join(
 ASSET_SELECT = f"""
 SELECT a.asset_id, a.asset_type, a.name, a.category, a.brand, a.serial_no,
        a.condition, a.status, a.image_path, a.added_by, a.created_at,
-       v.plate_no, v.make, v.model, v.mileage
+    v.plate_no, v.make, v.model, v.mileage,
+    current_assignment.assignment_id AS current_assignment_id,
+    current_assignment.user_id AS assigned_to_user_id,
+    assigned_user.username AS assigned_to_username
 FROM {ASSETS} a
 LEFT JOIN {VEHICLES} v ON v.asset_id = a.asset_id
+LEFT JOIN {ASSIGNMENTS} current_assignment
+    ON current_assignment.asset_id = a.asset_id AND current_assignment.returned_at IS NULL
+LEFT JOIN {USERS} assigned_user ON assigned_user.user_id = current_assignment.user_id
 """
 
 

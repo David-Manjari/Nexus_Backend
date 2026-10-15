@@ -10,6 +10,7 @@ from ..admin_accounts import (
     update_account,
 )
 from ..auth import roles_required
+from ..db import connect_database
 from ..services.audit import AuditSchemaNotConfigured, get_account_activity
 
 
@@ -19,6 +20,18 @@ users_bp = Blueprint("users", __name__)
 def _payload():
     data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
     return data if isinstance(data, dict) else {}
+
+
+@users_bp.get("/assignable")
+@roles_required("store_manager")
+def assignable_users():
+    """List active users for the store manager's asset assignment form."""
+    with connect_database() as connection:
+        users = connection.execute(
+            '''SELECT user_id, username, role FROM "Users"
+               WHERE is_active = TRUE ORDER BY username'''
+        ).fetchall()
+    return jsonify(users=users), 200
 
 
 @users_bp.get("/accounts")

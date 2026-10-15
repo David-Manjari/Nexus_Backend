@@ -7,6 +7,7 @@ from a secure environment variable before serving requests.
 from flask import Blueprint, jsonify, request, session
 
 from ..admin_accounts import MIN_PASSWORD_LENGTH
+from ..db import connect_database
 from ..user_login import AuthenticationError, authenticate_user
 
 
@@ -51,6 +52,28 @@ def login():
             "role": user["role"],
         },
     ), 200
+
+
+@sessions_bp.get("/me")
+def current_session():
+    """Return the current active user so browser clients can restore a session."""
+    user_id = session.get("user_id")
+    if user_id is None:
+        return jsonify(error="Authentication is required."), 401
+
+    with connect_database() as connection:
+        user = connection.execute(
+            '''SELECT user_id, username, email, role, is_active
+               FROM "Users" WHERE user_id = %s''',
+            (user_id,),
+        ).fetchone()
+
+    if user is None or not user["is_active"]:
+        session.clear()
+        return jsonify(error="Authentication is required."), 401
+
+    safe_user = {key: user[key] for key in ("user_id", "username", "email", "role")}
+    return jsonify(user=safe_user), 200
 
 
 @sessions_bp.post("/logout")
