@@ -151,8 +151,10 @@ def list_assets():
 
     search = request.args.get("q", "").strip()
     if search:
-        clauses.append("(a.name ILIKE %s OR a.serial_no ILIKE %s OR a.brand ILIKE %s)")
-        params.extend([f"%{search}%"] * 3)
+        clauses.append(
+            "(a.name ILIKE %s OR a.serial_no ILIKE %s OR a.brand ILIKE %s OR v.plate_no ILIKE %s)"
+        )
+        params.extend([f"%{search}%"] * 4)
 
     query = ASSET_SELECT
     if clauses:
